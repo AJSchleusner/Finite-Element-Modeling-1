@@ -1,0 +1,574 @@
+load "msh3"
+load "medit"
+
+//////////////////////////////////////////////////////////////////////////
+
+// Inputs from exeriment
+real Vch1 = 0.3;
+real Vch2 = 2.4;
+int nx = 43; 
+real Vgt = 0.0;
+real err = 0.1;
+real Vchth = 0.45;
+
+// number of points for cross-channel density distribution
+int numX = 1000;
+int numY =  600;
+
+// List of channel voltages 
+real[int] Vch(nx);
+for (int i = 0; i < nx; i++){
+    Vch[i] = Vch1 + i*(Vch2 - Vch1)/(nx - 1);
+}
+real dVch = Vch[1] - Vch[0];
+
+//////////////////////////////////////////////////////////////////////////
+
+// Defining gates and constants 
+int C0 = 99, gate = 98, channel = 97, C3 = 96, hlevel = 95, hedi = 94, ecloud = 93; 
+int nn = 40;                                                            // step numbers to find cloud width
+real depth = 1.38;                                                      // depth of channel (um)
+real walls = 1.50;                                                      // wall height (um)
+real wc = 7.0;                                                          // width of the channel (um)
+real n = 1;                                                             // global mesh scaling
+real sz = 10;                                                           // mesh area width (half)
+real high = 50;                                                         // mesh area height
+real eHe = 1.055;                                                       // dielectric constant of Helium
+real eD = 10;                                                           // dielectric constant of insulator
+real ep = 1e-5;                                                         // small offset to avoid evaluation exactly at the boundary
+real ThresholdE = 1e-5;                                                 // target accuracy for the edge electric field
+real elec = 1.60217e-19;                                                // electron charge in C
+real eps0 = 8.854e-12;                                                  // permittivity of free space in F/m
+
+//////////////////////////////////////////////////////////////////////////
+
+// 2D geometry (lines)
+border C01(t=high,walls) {x = -sz; y = t; label = C0;}                  // vacuum
+border G01(t=-sz,-wc/2) {x = t; y = walls; label = gate;}               // left gate
+border G02(t=walls,walls-0.05) {x = -wc/2; y = t; label = gate;}        // left gate
+border G03(t=-wc/2, -sz) {x = t; y = walls - 0.05; label = gate;}       // left gate       
+border C02(t=walls-0.05,0) {x = -sz; y = t; label = C0;}                // dielectric
+border Ch01(t=-sz,-wc/2) {x = t; y = 0; label = channel;}               // channel electrode
+border Ch02(t=-wc/2,wc/2) {x = t; y = 0; label = channel;}              // channel electrode
+border Ch03(t=wc/2,sz) {x = t; y = 0; label = channel;}                 // channel electrode
+border C03(t=0,walls-0.05) {x = sz; y = t; label = C0;}                 // dielectric
+border G04(t=sz,wc/2) {x = t; y = walls - 0.05; label = gate;}          // right gate
+border G05(t=walls-0.05,walls) {x = wc/2; y = t; label = gate;}         // right gate
+border G06(t=wc/2,sz) {x = t; y = walls; label = gate;}                 // right gate
+border C04(t=walls,high) {x = sz; y = t; label = C0;}                   // vacuum
+border C05(t=sz,-sz) {x = t; y = high; label = C0;}                     // vacuum (top)
+border D01(t=0,depth) {x = -wc/2; y = t; label = hedi;}                 // dielectric-channel edge
+border D02(t=0,depth) {x =  wc/2; y = t; label = hedi;}                 // dielectric-channel edge
+border D03(t=depth,walls-0.05) {x = -wc/2; y = t; label = hedi;}        // dielectric-channel edge
+border D04(t=depth,walls-0.05) {x =  wc/2; y = t; label = hedi;}        // dielectric-channel edge
+
+// 2D geometry (dielectric constants)
+func real dielectric(real xxx, real yyy) { 
+    if ( abs(xxx) > wc/2 && yyy < walls-0.05 ) { 
+       return eD; 
+    } else if ( yyy < depth ) { 
+       return eHe; 
+    } else { 
+      return 1.0;
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+// Build the 2D channel mesh
+real we = wc/2.0;
+border H01(t=-wc/2,-we/2) {x = t; y = depth; label = hlevel;}           // Helium level to left of center
+border ClM(t=-we/2,we/2) {x = t; y = depth; label = ecloud;}            // Electron cloud length
+border H02(t=we/2,wc/2) {x = t; y = depth; label = hlevel;}             // Helium level to right of center
+
+mesh Th = buildmesh(C01(20*n)+C02(2*n)+C03(2*n)+C04(20*n)+C05(10*n)
+                    +Ch01(20*n)+Ch02(160*n)+Ch03(20*n)
+                    +G01(20*n)+G02(100*n)+G03(20*n)
+                    +G04(20*n)+G05(100*n)+G06(20*n)
+                    +ClM(120*n)
+                    +H01(120*n)+H02(120*n)
+                    +D01(60*n)+D02(60*n)+D03(2*n)+D04(2*n)
+                    );
+
+// Solve the Poisson equation to be able get the coupling constant
+fespace Vh(Th, P2);
+Vh u, v;
+problem Electro(u, v) =
+    int2d(Th)( dielectric(x, y) * (dx(u)*dx(v)*1e12 + dy(u)*dy(v)*1e12) )
+    + on(channel, u = 1.0)
+    + on(gate, u = 0.0);
+Electro;
+
+// Evaluate the coupling constant alpha
+real alpha = u(0, depth + 1e-4);
+
+// Calculate the chemical potential
+real mu = alpha * Vchth;
+
+cout << "*****************************************************************" << endl;    
+cout << "coupling constant (alpha) = " << alpha << endl;
+cout << "chemical potential (mu)   = " << mu << endl;
+cout << "*****************************************************************" << endl;
+
+//////////////////////////////////////////////////////////////////////////
+
+// Creating the parameters matrix
+int numPARAMS = 9;
+real[int, int] ParametersMatrix(nx, numPARAMS);                         // The parameter matrix has nx rows (number of Vch values)
+for (int i = 0; i < nx; i++){
+    ParametersMatrix(i, 0) = Vch[i];
+    for (int j = 1; j < numPARAMS; j++){
+        ParametersMatrix(i, j) = 0;
+    }
+}
+
+// Creating 2D matrices for [x, Vch] sweeping 
+real[int, int] DensityDistrMatrix(numX, nx+1);                          // Distribution of areal densities
+real[int, int] PressingFieldMatrix(numX, nx+1);                         // Distribution of pressing electric field
+real[int, int] XaxisFieldMatrix(numX, nx+1);                            // Distribution of x-axis electric field
+real x1 = -5;                                                           // left edge of 'test region'
+real x2 =  5;                                                           // right edge of 'test region' 
+real y1 =  0;                                                           // bottom edge of 'test region'
+real y2 =  3;                                                           // top edge of 'test region'
+real[int] xlist(numX);                                                  // create empty position list of length numX
+for (int i = 0; i < numX; i++){
+    xlist[i] = x1 + (i) * (x2 - x1)/(numX);                             // xlist = list of position across the channel's cross section
+    DensityDistrMatrix(i, 0) = 0;                                       // The first column is the x position
+    PressingFieldMatrix(i, 0) = 0;
+    XaxisFieldMatrix(i, 0) = 0;
+    for (int j = 1; j < nx + 1; j++){                                   // All other columns are initially zero
+        DensityDistrMatrix(i, j) = 0;
+        PressingFieldMatrix(i, j) = 0; 
+        XaxisFieldMatrix(i, j) = 0;                             
+    }
+}
+// Creating list of y positions
+real[int] ylist(numY);                                                  // create empty position list of length numY
+for (int j = 0; j < numY; j++){
+    ylist[j] = y1 + (j) * (y2 - y1)/(numY);                             // ylist = list of vertical positions
+}
+
+// Creating files for 3D electric field data
+ofstream ExFile("step-6_Exfield.txt");
+ofstream EyFile("step-6_Ezfield.txt");
+// Creating files for 3D electric field data without electrons
+ofstream ExFileNoE("step-6_Exfield_noE.txt");
+ofstream EyFileNoE("step-6_Ezfield_noE.txt");
+
+//////////////////////////////////////////////////////////////////////////
+
+// Function to calculate the electric field at the boundary of the cloud
+func real EdgeField(real we, real Vch, real Vgt, real Ve){
+
+    // Adjust the mesh to the new electron cloud width
+    border H01(t=-wc/2,-we/2) {x = t; y = depth; label = hlevel;}       // helium level to left of electron cloud
+    border ClM(t=-we/2,we/2) {x = t; y = depth; label = ecloud;}        // electron cloud length
+    border H02(t=we/2,wc/2) {x = t; y = depth; label = hlevel;}         // helium level to right of electron cloud
+
+    // Build the mesh
+    mesh Th = buildmesh(C01(20*n)+C02(2*n)+C03(2*n)+C04(20*n)+C05(10*n)
+                    +Ch01(20*n)+Ch02(160*n)+Ch03(20*n)
+                    +G01(20*n)+G02(100*n)+G03(20*n)
+                    +G04(20*n)+G05(100*n)+G06(20*n)
+                    +ClM(120*n)
+                    +H01(120*n)+H02(120*n)
+                    +D01(60*n)+D02(60*n)+D03(2*n)+D04(2*n)
+                    );
+
+    // Solve the Poisson equation to be able get the electric field
+    fespace Vh1(Th, P2);
+    Vh1<real> u, v;
+    problem Electro(u, v) =
+        int2d(Th)( dielectric(x, y) * (dx(u)*dx(v) + dy(u)*dy(v)) )
+        + on(channel, u = Vch)
+        + on(gate, u = Vgt)
+        + on(ecloud, u = Ve);
+    Electro;
+
+    // Evaluate the electric field at the boundary of the cloud
+    real EdgeValue = dx(u)((we/2) + ep, depth);
+    return EdgeValue;
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+int nCLM = 0.0;
+
+// Function to calculate the capacitance per unit length
+func real GetCapacitance1V(real we, real Vch, real Vgt, real Ve){
+
+    if (we > 1e-6){
+        // Determine number of mesh points in electron cloud region
+        int nClM = max(2, int(we * 10)); // ensures at least 2 points
+
+        // Adjust the mesh to the new electron cloud width
+        border H01(t=-wc/2,-we/2) {x = t; y = depth; label = hlevel;}   // helium level to left of electron cloud
+        border ClM(t=-we/2,we/2) {x = t; y = depth; label = ecloud;}    // electron cloud length
+        border H02(t=we/2,wc/2) {x = t; y = depth; label = hlevel;}     // helium level to right of electron cloud
+
+        // Build the mesh
+        mesh Th = buildmesh(C01(20*n)+C02(2*n)+C03(2*n)+C04(20*n)+C05(10*n)
+                        +Ch01(20*n)+Ch02(160*n)+Ch03(20*n)
+                        +G01(20*n)+G02(100*n)+G03(20*n)
+                        +G04(20*n)+G05(100*n)+G06(20*n)
+                        +ClM(nCLM)
+                        +H01(60*n)+H02(60*n)
+                        +D01(60*n)+D02(60*n)+D03(2*n)+D04(2*n)
+                        );
+
+        // Solve the Poisson equation to be able get the electric field
+        fespace Vh2(Th, P2);
+        Vh2<real> u, v;
+        problem Electro(u, v) =
+            int2d(Th)( dielectric(x, y) * (dx(u)*dx(v) + dy(u)*dy(v)) )
+            + on(channel, u = Vch)
+            + on(gate, u = Vgt)
+            + on(ecloud, u = Ve);
+        Electro;
+
+        // Calculate the capacitance per unit length and densities
+        real AreaDens = eps0 / elec * 1e6 * int1d(Th, ecloud) (         // The 1e6 is to convert from dy[um] to dy[m]
+            dy(u)(x, depth+1e-4) - eHe * dy(u)(x, depth-1e-4)) / 
+            (we * 1e-6);                                                // The 1e-6 is to convert we from um to m
+        real LinDens = (we * 1e-6) * AreaDens;                          // Linear density in m^-1
+        real capacitance = LinDens * elec;                              // capacitance per unit length in F/m
+        return capacitance;                                             // C = Q/V, Q = linear density * electron charge, V = 1V
+    } else {
+        return 0.0;
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+// Loop over the channel voltages
+for (int i = 0; i < nx; i++) {
+    cout << i << "   " << Vch[i] << endl;
+
+    //////////////////////////////////////////////////////////////////////
+
+    // Bisection method to find the electron cloud width
+    real a = wc - 0.05;                                                 // Initial interval [a,b] to search for the cloud width                        
+    real b = 0.05; 
+    // Initialize the electric field variables
+    real FieldA = 0.0;
+    real FieldB = 0.0;
+    real FieldX = 0.0;
+    // Sign variable
+    real sign1 = 0.0;
+    real xm = 0.0;
+    
+    for (int loop = 1; loop <= nn; loop += 1) {                         // Search for electron cloud width by bisection method
+        xm = (a + b)/2;                                                 // Middle point of the cloud width interval
+
+        // electric field at the boundary of the cloud
+        FieldX = EdgeField(xm, Vch[i], 0, mu);                                         
+        cout << "*****************************************************************" << endl;    
+        cout << "loop number      = " << loop << endl;
+        cout << "cloud width (um) = " << xm << endl;
+        cout << "E-field at edge  = " << FieldX << endl;
+        cout << "*****************************************************************" << endl;
+
+        // If the field at x is near zero or a is nearly b, then
+        // exit the loop early.  Otherwise continue until loop = nn
+        if (abs(FieldX) < ThresholdE || abs(b-a) < 0.001) { loop = nn; }
+        // If the loop is the first one, then we need to define the signs
+        // of the edge electric field at the ends of the width range (a and b)
+        else if (loop < 2) {
+            // Electric field for cloud width a
+            FieldA = EdgeField(a, Vch[i], 0, mu);                                       
+            // Electric field for cloud width b 
+            FieldB = EdgeField(b, Vch[i], 0, mu);
+            // Determine if a zero  exists between a and b
+            if (FieldA * FieldB > 0) {
+                cout << "No zero within interval" << endl;
+                xm = 0.0;
+                loop = nn;
+            } else {
+                real sign = FieldA * FieldX;
+                // If points a and x are on the same side of the zero,
+                // then replace a by x, otherwise replace b by x
+                if (sign < 0) { b = xm; FieldB = FieldX; }
+                else { a = xm; FieldA = FieldX; }
+            }
+        }
+        // For all other loops, we already know the signs of the
+        // edge electric fields and do not want to recalculate them
+        else {
+            sign1 = FieldA * FieldX;
+            if (sign1 < 0) { b = xm; FieldB = FieldX; }
+            else { a = xm; FieldA = FieldX; }
+        }
+    }
+
+    // found cloud width for the given channel voltage
+    real we = xm;
+    cout << "*****************************************************************" << endl;    
+    cout << Vch[i] << " cloud width = " << xm << " um" << endl;
+    cout << "*****************************************************************" << endl;
+
+    //////////////////////////////////////////////////////////////////////
+
+    // Declaring density variables    
+    real MeanDens = 0.0;
+    real LinDens = 0.0;
+    real MaxDens = 0.0;
+    real nrows = 0.0;
+    real gap = 0.0;
+
+    //////////////////////////////////////////////////////////////////////
+
+    // Adjust the mesh to the found electron cloud width if it is not zero
+    if (we > 1e-6){
+        border H01(t=-wc/2,-we/2) {x = t; y = depth; label = hlevel;}   // helium level to left of electron cloud
+        border ClM(t=-we/2,we/2) {x = t; y = depth; label = ecloud;}    // electron cloud length
+        border H02(t=we/2,wc/2) {x = t; y = depth; label = hlevel;}     // helium level to right of electron cloud
+        // Build the mesh
+        mesh Th3 = buildmesh(C01(20*n)+C02(2*n)+C03(2*n)+C04(20*n)+C05(10*n)
+                    +Ch01(20*n)+Ch02(160*n)+Ch03(20*n)
+                    +G01(20*n)+G02(100*n)+G03(20*n)
+                    +G04(20*n)+G05(100*n)+G06(20*n)
+                    +ClM(120*n)
+                    +H01(60*n)+H02(60*n)
+                    +D01(60*n)+D02(60*n)+D03(2*n)+D04(2*n)
+                    );
+
+        // Solve the Poisson equation to be able get the electron density
+        fespace Vh3(Th3, P2);
+        Vh3 u3, v3;
+        problem Electro(u3, v3) =
+            int2d(Th3)( dielectric(x, y) * (dx(u3)*dx(v3) + dy(u3)*dy(v3)) )
+            + on(channel, u3 = Vch[i])
+            + on(gate, u3 = 0.0)
+            + on(ecloud, u3 = mu);
+        Electro;
+
+        // Determine densities
+        MeanDens = eps0 / elec * int1d(Th3, ecloud) (                   // MeanDens is the average areal density
+            dy(u3)(x, depth+1e-4) - eHe * dy(u3)(x, depth-1e-4)) / 
+            (we * 1e-6);                                                // The 1e-6 is to convert we from um to m
+        LinDens = (we * 1e-6) * MeanDens;                               // Linear density in m^-1
+        MaxDens = eps0 / elec * 1e6 * ( dy(u3)(0, depth+1e-4) -         // MaxDens is the maximum areal density (at center channel)
+            eHe * dy(u3)(0, depth-1e-4) );
+        cout << " average density (m^2) = " << MeanDens << endl;
+        cout << " maximum density (m^2) = " << MaxDens  << endl;
+
+        // Calculate number of rows
+        gap = sqrt(2/(sqrt(3)*MeanDens));
+        nrows = sqrt(3)*we*1e-6/(2*gap);
+
+        // Populate the two 2D matrices
+        for (int k = 1; k < numX; k++) {
+            DensityDistrMatrix(k, i + 1) = eps0 / elec * 1e6 *              // The 1e6 is to convert from dy[um] to dy[m]
+                (dy(u3)(xlist[k], depth+1e-4) - eHe * dy(u3)(
+                xlist[k], depth-1e-4));
+            DensityDistrMatrix(k, 0) = xlist[k];
+            PressingFieldMatrix(k, i + 1) = 1e6 * (dy(u3)(xlist[k],         // The -1e6 is to convert from dy[um] to dy[m]
+                depth+1e-4) + dy(u3)(xlist[k], depth-1e-4))/2;
+            PressingFieldMatrix(k, 0) = xlist[k];
+            XaxisFieldMatrix(k, i + 1) = -1e6 * dx(u3)(xlist[k],            // The -1e6 is to convert from dx[um] to dx[m]
+                depth+1e-4);
+            XaxisFieldMatrix(k, 0) = xlist[k];
+        }
+
+        // 3D matrix of electric fields: E(x, y, Vch)
+        for (int m = 0; m < numX; ++m) {
+
+            for (int n = 0; n < numY; ++n) {
+                real x = xlist[m];
+                real y = ylist[n];
+
+                // Evaluate electric field components at (x, y)
+                real exval = -1e6 * dx(u3)(x, y);  // x-component of E at (x, y)
+                real eyval = -1e6 * dy(u3)(x, y);  // y-component of E at (x, y)
+
+                // Write to file
+                ExFile << x << " " << y << " " << Vch[i] << " " << exval << endl;
+                EyFile << x << " " << y << " " << Vch[i] << " " << eyval << endl;
+            }
+
+        ParametersMatrix(i,1) = we;
+        ParametersMatrix(i,2) = MeanDens;
+        ParametersMatrix(i,3) = MaxDens;
+        ParametersMatrix(i,4) = LinDens;
+        ParametersMatrix(i,5) = gap;
+        ParametersMatrix(i,6) = nrows;
+        }
+
+    //////////////////////////////////////////////////////////////////////
+
+    // No electrons case in terms of mesh
+    } else {
+        border H01(t=-3.5, 3.5) {x = t; y = depth; label = hlevel;}    // helium level
+        // Build the mesh
+        mesh Th3 = buildmesh(C01(20*n)+C02(2*n)+C03(2*n)+C04(20*n)+C05(10*n)
+                    +Ch01(20*n)+Ch02(160*n)+Ch03(20*n)
+                    +G01(20*n)+G02(100*n)+G03(20*n)
+                    +G04(20*n)+G05(100*n)+G06(20*n)
+                    +H01(200*n)
+                    +D01(60*n)+D02(60*n)+D03(2*n)+D04(2*n)
+                    );
+
+        // Solve the Poisson equation to be able get the electron density
+        fespace Vh3(Th3, P2);
+        Vh3 u3, v3;
+        problem Electro(u3, v3) =
+            int2d(Th3)( dielectric(x, y) * (dx(u3)*dx(v3) + dy(u3)*dy(v3)) )
+            + on(channel, u3 = Vch[i])
+            + on(gate, u3 = 0.0)
+            + on(ecloud, u3 = mu);
+        Electro;
+
+        // Densities are zero
+        MeanDens = 0.0;
+        LinDens = 0.0;
+        MaxDens = 0.0;
+        cout << " average density (m^2) = " << MeanDens << endl;
+        cout << " maximum density (m^2) = " << MaxDens  << endl;
+
+        // Calculate number of rows
+        gap = 0.0;
+        nrows = 0.0;
+
+        // Populate the two 2D matrices
+        for (int k = 1; k < numX; k++) {
+            DensityDistrMatrix(k, i + 1) = eps0 / elec * 1e6 *              // The 1e6 is to convert from dy[um] to dy[m]
+                (dy(u3)(xlist[k], depth+1e-4) - eHe * dy(u3)(
+                xlist[k], depth-1e-4));
+            DensityDistrMatrix(k, 0) = xlist[k];
+            PressingFieldMatrix(k, i + 1) = 1e6 * (dy(u3)(xlist[k],         // The -1e6 is to convert from dy[um] to dy[m]
+                depth+1e-4) + dy(u3)(xlist[k], depth-1e-4))/2;
+            PressingFieldMatrix(k, 0) = xlist[k];
+            XaxisFieldMatrix(k, i + 1) = -1e6 * dx(u3)(xlist[k],            // The -1e6 is to convert from dx[um] to dx[m]
+                depth+1e-4);
+            XaxisFieldMatrix(k, 0) = xlist[k];
+        }
+
+        // 3D matrix of electric fields: E(x, y, Vch)
+        for (int m = 0; m < numX; ++m) {
+
+            for (int n = 0; n < numY; ++n) {
+                real x = xlist[m];
+                real y = ylist[n];
+
+                // Evaluate electric field components at (x, y)
+                real exval = -1e6 * dx(u3)(x, y);  // x-component of E at (x, y)
+                real eyval = -1e6 * dy(u3)(x, y);  // y-component of E at (x, y)
+
+                // Write to file
+                ExFile << x << " " << y << " " << Vch[i] << " " << exval << endl;
+                EyFile << x << " " << y << " " << Vch[i] << " " << eyval << endl;
+            }
+
+        ParametersMatrix(i,1) = we;
+        ParametersMatrix(i,2) = MeanDens;
+        ParametersMatrix(i,3) = MaxDens;
+        ParametersMatrix(i,4) = LinDens;
+        ParametersMatrix(i,5) = gap;
+        ParametersMatrix(i,6) = nrows;
+        }
+    }
+
+    //////////////////////////////////////////////////////////////////////
+
+    // No electrons case in potential case (still have cloud shape in mesh)
+    if (we > 1e-6){
+        border H01(t=-wc/2,-we/2) {x = t; y = depth; label = hlevel;}   // helium level to left of electron cloud
+        border ClM(t=-we/2,we/2) {x = t; y = depth; label = ecloud;}    // electron cloud length
+        border H02(t=we/2,wc/2) {x = t; y = depth; label = hlevel;}     // helium level to right of electron cloud
+
+        // Build the mesh
+        mesh Th4 = buildmesh(C01(20*n)+C02(2*n)+C03(2*n)+C04(20*n)+C05(10*n)
+                    +Ch01(20*n)+Ch02(160*n)+Ch03(20*n)
+                    +G01(20*n)+G02(100*n)+G03(20*n)
+                    +G04(20*n)+G05(100*n)+G06(20*n)
+                    +ClM(120*n)
+                    +H01(60*n)+H02(60*n)
+                    +D01(60*n)+D02(60*n)+D03(2*n)+D04(2*n)
+                    );
+
+        // Solve the Poisson equation to be able get the electron density
+        fespace Vh4(Th4, P2);
+        Vh4 u4, v4;
+        problem Electro(u4, v4) =
+            int2d(Th4)( dielectric(x, y) * (dx(u4)*dx(v4) + dy(u4)*dy(v4)) )
+            + on(channel, u4 = Vch[i])
+            + on(gate, u4 = 0.0);
+        Electro;
+
+        // 3D matrix of electric fields: E(x, y, Vch)
+        for (int m = 0; m < numX; ++m) {
+            for (int n = 0; n < numY; ++n) {
+                real x = xlist[m];
+                real y = ylist[n];
+                // Evaluate electric field components at (x, y)
+                real exval = -1e6 * dx(u4)(x, y);                       // x-component of E at (x, y)
+                real eyval = -1e6 * dy(u4)(x, y);                       // y-component of E at (x, y)
+                // Write to file
+                ExFileNoE << x << " " << y << " " << Vch[i] << " " << exval << endl;
+                EyFileNoE << x << " " << y << " " << Vch[i] << " " << eyval << endl;
+            }
+        }
+
+    //////////////////////////////////////////////////////////////////////
+
+    // No electron cloud case in both mesh and potential
+    } else {
+        border H01(t=-3.5, 3.5) {x = t; y = depth; label = hlevel;}     // helium level
+
+        // Build the mesh
+        mesh Th4 = buildmesh(C01(20*n)+C02(2*n)+C03(2*n)+C04(20*n)+C05(10*n)
+                    +Ch01(20*n)+Ch02(160*n)+Ch03(20*n)
+                    +G01(20*n)+G02(100*n)+G03(20*n)
+                    +G04(20*n)+G05(100*n)+G06(20*n)
+                    +H01(200*n)
+                    +D01(60*n)+D02(60*n)+D03(2*n)+D04(2*n)
+                    );
+
+        // Solve the Poisson equation to be able get the electron density
+        fespace Vh4(Th4, P2);
+        Vh4 u4, v4;
+        problem Electro(u4, v4) =
+            int2d(Th4)( dielectric(x, y) * (dx(u4)*dx(v4) + dy(u4)*dy(v4)) )
+            + on(channel, u4 = Vch[i])
+            + on(gate, u4 = 0.0);
+        Electro;
+
+        // 3D matrix of electric fields: E(x, y, Vch)
+        for (int m = 0; m < numX; ++m) {
+            for (int n = 0; n < numY; ++n) {
+                real x = xlist[m];
+                real y = ylist[n];
+                // Evaluate electric field components at (x, y)
+                real exval = -1e6 * dx(u4)(x, y);                       // x-component of E at (x, y)
+                real eyval = -1e6 * dy(u4)(x, y);                       // y-component of E at (x, y)
+                // Write to file
+                ExFileNoE << x << " " << y << " " << Vch[i] << " " << exval << endl;
+                EyFileNoE << x << " " << y << " " << Vch[i] << " " << eyval << endl;
+            }
+        }
+    }
+
+    //////////////////////////////////////////////////////////////////////
+
+    // capacitance per unit length
+    real capacitanceCH = GetCapacitance1V(we, 1.0, 0.0, 0.0);           // capacitance from electron cloud to channel electrode
+    real capacitanceGT = GetCapacitance1V(we, 0.0, 1.0, 0.0);           // capacitance from electron cloud to gate electrode
+
+    cout << "CH capacitance/m is ------- " << capacitanceCH << " F/m" << endl;
+    cout << "GT capacitance/m is ------- " << capacitanceGT << " F/m" << endl;
+
+    ParametersMatrix(i,7) = capacitanceCH;
+    ParametersMatrix(i,8) = capacitanceGT;
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+ofstream params("step-6_params.txt");
+ofstream den("step-6_density.txt");
+ofstream yfield("step-6_pressing.txt");
+ofstream xfield("step-6_xfield.txt");
+params << ParametersMatrix << endl;
+den << DensityDistrMatrix << endl;
+yfield << PressingFieldMatrix << endl;
+xfield << XaxisFieldMatrix << endl;
+cout << "FEM code concluded" << endl;

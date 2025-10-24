@@ -1,0 +1,120 @@
+load "msh3"
+load "gmsh"
+load "medit"
+load "mshmet"
+load "tetgen"
+
+// Load our mesh into this edp file
+mesh3 Th = gmshload3("Step 3 mch-device 25c.msh"); // Our mesh is named "Th"
+// Open file in separate gmsh window
+medit("open_gmesh_window",Th,wait=1);
+
+// Values that align with that of the .geo file
+real dHe   = 1.38;   // depth of the helium in the microchannel (um)
+real delta = 0.000;  // height adjustment for the coupling constants
+
+// Dielectrics 
+real eD   = 11.0;
+real eHe  = 1.058;
+real eAir = 1.0; 
+
+// Selection of region to cover for FEM
+
+real startx  = -60.0;  // A little beyond the left edge of channel
+real endx    =  60.0;  // A little beyond the right edge of channel
+
+real starty  = -10.0;  // A little beyond the y-negative edge of channel
+real endy    =  20.0;  // A little beyond the y-positive edge of channel
+
+int  Nxfine  =  1200;  // x points number 
+int  Nyfine  =   300;  // y points number
+
+// Physical Volumes
+// 1 - Helium
+// 2 - Dielectric
+// 3 - Dielectric
+// 4 - Vacuum
+
+// Physical Surfaces (Electrodes)
+// 5 - Channel
+// 6 - Reservoir Left
+// 7 - Reservoir Right
+// 8 - Gate
+// 9 - Guard
+
+// Electron Surface Layers
+// 10 - Reservoir Left
+// 11 - Channel
+// 12 - Reservoir Right
+
+int numE = 5;                                   // Number of electrodes 
+real[int,int] V(numE,numE);                     // Our matrix V is an numE by numE matrix
+for(int i=0; i<numE; i+=1){
+    for(int j=0; j<numE; j+=1){
+        if(i==j){V(i,j)=1.0;}                   // If on diagonal, set to 1
+        else{V(i,j)=1e-9;}                      // If off diagonal, make very small
+    }
+}
+
+for(int k=0; k<numE; k+=1){
+    fespace Vh(Th,P23d);                        // Our finite element space is named "Vh" (Variational Method)
+    Vh<real> u,v,usol,h;                        // u is the potential, v is the test function
+    macro Grad(u) [dx(u),dy(u),dz(u)] //        // Gradient ("Grad") is a macro
+
+    problem Electro(u,v,solver=CG) =            // Conjugate Gradient ("CG")
+          int3d(Th, 1)( eHe*Grad(u)'*Grad(v))   // This is "the weak formulation" 
+        + int3d(Th, 2)(  eD*Grad(u)'*Grad(v))
+        + int3d(Th, 3)(  eD*Grad(u)'*Grad(v))
+        + int3d(Th, 4)(eAir*Grad(u)'*Grad(v))
+        + on ( 5,u=V(k,0))                      // The voltage of the matrix V is appled to each electrode for the given cycle of "k" 
+        + on ( 6,u=V(k,1))
+        + on ( 7,u=V(k,2))
+        + on ( 8,u=V(k,3)) 
+        + on ( 9,u=V(k,4));
+    Electro;
+
+    Vh<real> Ex, Ey, Ez;
+    Ex = -dx(u);                                // Electric field component in x
+    Ey = -dy(u);                                // Electric field component in y
+    Ez = -dz(u);                                // Electric field component in z
+
+    real[int,int] Vm(Nxfine,Nyfine);
+    real[int,int] Exm(Nxfine,Nyfine);           // Electric field X component
+    real[int,int] Eym(Nxfine,Nyfine);           // Electric field Y component
+    real[int,int] Ezm(Nxfine,Nyfine);           // Electric field Z component
+    real[int] xlist(Nxfine);                    // Positions along x-axis (um)
+    real[int] ylist(Nyfine);                    // Positions along y-axis (um)
+
+    func real profile(real X, real Y, real Z){  // Replace insignificant solutions with a zero (set low threshold)
+        if(abs(u(X,Y,Z))<1e-8){return 0.0;}
+        else{return u(X,Y,Z);}
+    }
+
+    cout << "successful so far" << endl;
+
+    for(int i=0; i<Nxfine; i+=1){
+        real Xaxis = startx + i*(endx - startx)/(Nxfine - 1);           // Add each x position to the xlist  
+        xlist[i] = Xaxis;
+        for(int j=0; j<Nyfine; j+=1){
+            real Yaxis = starty + j*(endy - starty)/(Nyfine - 1);       // Add each y position to the ylist 
+            real Zaxis = dHe + delta;                                   // z axis position
+            Vm(i,j) = profile(Xaxis,Yaxis,Zaxis);                       // Coupling matrix (Vm) values being filled with the appropriate "profile" output
+            Exm(i,j) = -dx(u)(Xaxis,Yaxis,Zaxis);                       // Electric field X
+            Eym(i,j) = -dy(u)(Xaxis,Yaxis,Zaxis);                       // Electric field Y
+            Ezm(i,j) = -dz(u)(Xaxis,Yaxis,Zaxis);                       // Electric field Z
+            if (i==Nxfine-1){ylist[j] = Yaxis;}
+        }
+    }
+
+    ofstream Alpha("alpha_" + k + ".txt"); Alpha << Vm << endl;
+    ofstream Xfile("xlist.txt");           Xfile << xlist << endl;
+    ofstream Yfile("ylist.txt");           Yfile << ylist << endl;
+    ofstream Exfile("Ex_" + k + ".txt");   Exfile << Exm << endl;
+    ofstream Eyfile("Ey_" + k + ".txt");   Eyfile << Eym << endl;
+    ofstream Ezfile("Ez_" + k + ".txt");   Ezfile << Ezm << endl;
+
+
+    cout << "Loop " << k << " Complete" << endl;
+}
+
+cout << "Files Successfully Created" << endl;

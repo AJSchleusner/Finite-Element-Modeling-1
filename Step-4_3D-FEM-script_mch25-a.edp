@@ -1,0 +1,105 @@
+load "msh3"
+load "gmsh"
+load "medit"
+load "mshmet"
+load "tetgen"
+
+// Load our mesh into this edp file
+mesh3 Th = gmshload3("Step 3 mch-device 25a.msh"); // Our mesh is named "Th"
+// Open file in separate gmsh window
+medit("open_gmesh_window",Th,wait=1);
+
+// Values that align with that of the .geo file
+real dHe   = 1.38;   // depth of the helium in the microchannel (um)
+real delta = 0.000;  // height adjustment for the coupling constants
+
+// Dielectrics 
+real eD   = 11.0;
+real eHe  = 1.058;
+real eAir = 1.0; 
+
+// Selection of region to cover for FEM
+real lx = 160.0; // x length
+real ly =  40.0; // y length
+real oy =   0.0; // y offset
+int  Nx =   800; // x points number 
+int  Ny =   200; // y points number
+
+// Physical Volumes
+// 1 - Helium
+// 2 - Dielectric
+// 3 - Dielectric
+// 4 - Vacuum
+
+// Physical Surfaces (Electrodes)
+// 5 - Channel
+// 6 - Reservoir Left
+// 7 - Reservoir Right
+// 8 - Gate
+// 9 - Guard
+
+// Electron Surface Layers
+// 10 - Reservoir Left
+// 11 - Channel
+// 12 - Reservoir Right
+
+int numE = 5;  // Number of electrodes 
+real[int,int] V(numE,numE);    // Our matrix V is an numE by numE matrix
+for(int i=0; i<numE; i+=1){
+    for(int j=0; j<numE; j+=1){
+        if(i==j){V(i,j)=1.0;}  // If on diagonal, set to 1
+        else{V(i,j)=1e-9;}     // If off diagonal, make very small
+    }
+}
+
+for(int k=0; k<numE; k+=1){
+    fespace Vh(Th,P13d);                        // Our finite element space is named "Vh" (Variational Method)
+    Vh<real> u,v,usol,h;                        // u is the potential, v is the test function
+    macro Grad(u) [dx(u),dy(u),dz(u)] //        // Gradient ("Grad") is a macro
+
+    problem Electro(u,v,solver=CG) =            // Conjugate Gradient ("CG")
+          int3d(Th, 1)( eHe*Grad(u)'*Grad(v))   // This is "the weak formulation" 
+        + int3d(Th, 2)(  eD*Grad(u)'*Grad(v))
+        + int3d(Th, 3)(  eD*Grad(u)'*Grad(v))
+        + int3d(Th, 4)(eAir*Grad(u)'*Grad(v))
+        + on ( 5,u=V(k,0))                     // The voltage of the matrix V is appled to each electrode for the given cycle of "k" 
+        + on ( 6,u=V(k,1))
+        + on ( 7,u=V(k,2))
+        + on ( 8,u=V(k,3)) 
+        + on ( 9,u=V(k,4));
+    Electro;
+
+    real[int,int] Vm(Nx,Ny);
+    real[int] xlist(Nx);                        // Positions along x-axis (um)
+    real[int] ylist(Ny);                        // Positions along y-axis (um)
+
+    func real profile(real X, real Y, real Z){  // Replace insignificant solutions with a zero (set low threshold)
+        if(abs(u(X,Y,Z))<1e-8){return 0.0;}
+        else{return u(X,Y,Z);}
+    }
+
+    cout << "successful so far" << endl;
+
+    for(int i=0; i<Nx; i+=1){
+        real Xaxis = -lx/2 + i*(lx/(Nx+1));        // Add each x position to the xlist  
+        xlist[i] = Xaxis;
+        for(int j=0; j<Ny; j+=1){
+            real Yaxis = -ly/2 + j*(ly/(Ny+1)) + oy;    // Add each y position to the ylist 
+            Vm(i,j) = profile(Xaxis,Yaxis,dHe+delta);// Coupling matrix (Vm) values being filled with the appropriate "profile" output
+            if (i==Nx-1){ylist[j] = Yaxis;}
+        }
+    }
+
+    ofstream Alpha("alpha_" + k + ".txt");
+    Alpha << Vm << endl;
+
+    ofstream Xfile("xlist.txt");
+    Xfile << xlist << endl;
+
+    ofstream Yfile("ylist.txt");
+    Yfile << ylist << endl;
+
+    cout << "Loop " << k << " Complete" << endl;
+}
+
+cout << "Files Successfully Created" << endl;
